@@ -366,6 +366,17 @@ This implementation satisfies the requirements from [https://gnu-ai.org/doku.php
 - **Extensive documentation**: Claude Delannoy style comments
 - **Hurd integration**: Full trivfs translator implementation
 
+## Cluster Operation
+
+As of orchestrator phase 3, GNU AI runs on multi-node Hurd clusters:
+instances of this translator are launched on remote nodes and driven
+by the orchestrator over SSH. This translator is deliberately
+unchanged by that — each node runs its own instance, driven by local
+POSIX `write`/`read`, and the contract (write topology, write input,
+read status/output) is identical whether the instance is local or
+remote. No network capability is added to this translator:
+distribution is the orchestrator's responsibility.
+
 ## Troubleshooting
 
 ### Compilation Errors
