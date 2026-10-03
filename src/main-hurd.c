@@ -67,9 +67,15 @@ print_version_hook (FILE *stream, struct argp_state *state)
 void (*argp_program_version_hook) (FILE *, struct argp_state *)
     = print_version_hook;
 
-/* Command-line options accepted by the translator */
+/* Command-line options accepted by the translator.
+ *
+ * -h is declared explicitly: glibc's argp answers --help natively
+ * but NOT its short form -h (it reserves only '?'), and the GNU
+ * convention used across the GNU AI stack is that both spellings
+ * exit 0 with the same answer. */
 static struct argp_option options[] = {
   {"bias", 'b', "FLOAT", 0, "Initial bias value for the neuron", 0},
+  {"help", 'h', 0, 0, "display this help and exit", 0},
   { 0 }
 };
 
@@ -79,13 +85,15 @@ float global_bias = 0.0f;
 static error_t
 parse_opt (int key, char *arg, struct argp_state *state)
 {
-  (void) state;                 /* Unused: no ARGP_KEY_ handling needs it */
-
   switch (key)
     {
     case 'b':
       global_bias = atof (arg);
       break;
+    case 'h':
+      /* The same standard help as --help, on stdout, exit 0. */
+      argp_state_help (state, stdout, ARGP_HELP_STD_HELP);
+      exit (EXIT_SUCCESS);
     case ARGP_KEY_SUCCESS:
       break;
     default:
