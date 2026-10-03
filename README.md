@@ -356,6 +356,11 @@ This implementation satisfies the requirements from [https://gnu-ai.org/doku.php
 - **Memory efficiency**: Single contiguous allocation, float32 storage
 - **CPU efficiency**: Optimized forward pass, cache-friendly access
 - **Scalability**: Supports thousands of neurons
+- **Multi-task and multi-user operation**: the translator must serve several
+  users **simultaneously** — concurrent `write` commands and `read` requests
+  on `/llm` are serialized by a lock, each `read` returns one consistent
+  snapshot (topology and outputs never mixed mid-pass), and no unprotected
+  global state may serialize users with each other
 - **POSIX compliance**: Follows POSIX standards
 - **C standard compliance**: Uses C23 standard
 - **Extensive documentation**: Claude Delannoy style comments
