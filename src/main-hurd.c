@@ -42,9 +42,30 @@
  * which holds the port buckets libtrivfs serves our RPCs through. */
 struct trivfs_control *fsys;
 
-const char *argp_program_version = "sigmoid-neuron-0.1";
+const char *argp_program_version = "sigmoid-neuron-translator (GNU AI) 0.1.0";
 const char *argp_program_bug_address = "<claire@gnu-ai.org>";
 static char doc[] = "GNU/Hurd sigmoid neuron translator.";
+
+/* The standard GNU --version answer.  The default argp answer
+ * prints only the version line; the hook prints the full block
+ * (project, version, license) so the Hurd entry point answers
+ * exactly like the verification build of main.c on other POSIX
+ * systems. */
+static void
+print_version_hook (FILE *stream, struct argp_state *state)
+{
+  (void) state;                  /* Unused: no state needed here */
+
+  fprintf (stream, "%s\n", argp_program_version);
+  fprintf (stream, "License GPLv3+: GNU GPL version 3 or later"
+           " <https://gnu.org/licenses/gpl.html>.\n");
+  fprintf (stream, "This is free software: you are free to change"
+           " and redistribute it.\n");
+  fprintf (stream, "There is NO WARRANTY, to the extent permitted by law.\n");
+}
+
+void (*argp_program_version_hook) (FILE *, struct argp_state *)
+    = print_version_hook;
 
 /* Command-line options accepted by the translator */
 static struct argp_option options[] = {

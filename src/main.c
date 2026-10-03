@@ -24,6 +24,10 @@
  *  and compilation verification.
  */
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +45,79 @@
 
 /*****************************************************************************
  *                                                                           *
+ *                    THE GNU BASE COMMANDS                                  *
+ *                                                                           *
+ *****************************************************************************/
+
+/**
+ * @brief Print the standard GNU --version answer
+ *
+ * The version number comes from configure (config.h), the single
+ * source of truth of the release; the layout follows the GNU
+ * coding standards so scripts can grep it.
+ */
+static void print_version(void)
+{
+    printf("sigmoid-neuron-translator (GNU AI) %s\n", VERSION);
+    printf("License GPLv3+: GNU GPL version 3 or later"
+           " <https://gnu.org/licenses/gpl.html>.\n");
+    printf("This is free software: you are free to change"
+           " and redistribute it.\n");
+    printf("There is NO WARRANTY, to the extent permitted by law.\n");
+}
+
+/**
+ * @brief Print the standard GNU --help answer
+ *
+ * The usage documents both faces of the translator: the mounted
+ * POSIX interface (the Hurd way to drive the network) and the
+ * verification build of non-Hurd systems.
+ */
+static void print_help(void)
+{
+    printf("Usage: sigmoid-neuron-translator [OPTION]...\n");
+    printf("Feedforward sigmoid network as a GNU/Hurd translator.\n");
+    printf("\n");
+    printf("  -h, --help     display this help and exit\n");
+    printf("  -V, --version  output version information and exit\n");
+    printf("\n");
+    printf("On GNU/Hurd, mount and drive it through the filesystem:\n");
+    printf("  sudo settrans -c /llm /hurd/sigmoid-neuron-translator\n");
+    printf("  cat /llm\n");
+    printf("\n");
+    printf("Report bugs at <https://github.com/gnu-ai/neuron-translator/issues>.\n");
+}
+
+/**
+ * @brief Answer the GNU base commands --version and --help
+ *
+ * Every binary of the GNU AI stack answers the two base commands
+ * of the GNU toolbox before anything else, so a translator stays
+ * inspectable like any other GNU tool.  On GNU/Hurd, main-hurd.c
+ * gets the same behavior from argp.
+ *
+ * @param argc  argument count
+ * @param argv  argument vector
+ * @return true when one of the commands was answered (exit 0),
+ *         false when the normal startup should proceed
+ */
+static bool handle_gnu_options(int argc, char *argv[])
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-V") == 0) {
+            print_version();
+            return true;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_help();
+            return true;
+        }
+    }
+    return false;
+}
+
+/*****************************************************************************
+ *                                                                           *
  *                      MAIN ENTRY POINT                                    *
  *                                                                           *
  *****************************************************************************/
@@ -54,8 +131,14 @@
  * 
  * @return Exit code (0 on success, non-zero on error)
  */
-int main(void)
+int main(int argc, char *argv[])
 {
+    /* The GNU base commands --version and --help are answered
+     * before anything else; the translator stays inspectable
+     * like any other GNU tool. */
+    if (handle_gnu_options(argc, argv))
+        return EXIT_SUCCESS;
+
     /* On GNU/Hurd, when loaded as a translator by settrans, main() is called
      * and should start the trivfs server, which will handle the message loop
      * and dispatch to our fs_* functions.
