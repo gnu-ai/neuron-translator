@@ -26,6 +26,19 @@
  *  our own definitions of all of them.
  */
 
+#if ON_HURD == 1
+/* GNU Mach 1.8+git20260224 (the Debian forky/sid snapshot): the
+ * installed mach_host.h uses processor_name_array_t, but no
+ * installed header defines it — the MIG header generation of
+ * this snapshot drops the typedef.  Provide the canonical
+ * definition (an array of processor_info_t) BEFORE every Mach
+ * include (the project's own trivfs-hooks.h pulls <mach.h>);
+ * C tolerates the identical redefinition the day the snapshot is
+ * fixed. */
+#include <mach/processor_info.h>
+typedef processor_info_t *processor_name_array_t;
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
