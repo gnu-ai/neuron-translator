@@ -139,11 +139,9 @@ int network_init(CompactNeuralNetwork *net,
         net->topology.layer_sizes[i] = layer_sizes[i];
     }
     
-    /* Set neuron parameters */
+    /* Set the initial scratch voltage (no other neuron parameters
+     * exist: the model is a pure sigmoid feedforward pass). */
     net->topology.reset_potential = RESET_POTENTIAL;
-    net->topology.threshold = THRESHOLD;
-    net->topology.leak_rate = LEAK_RATE;
-    net->topology.refractory_length = REFRACTORY_LENGTH;
     
     /* Calculate total neuron count */
     net->total_neurons = 0;

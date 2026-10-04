@@ -175,14 +175,8 @@ build_info_text(char *buffer, size_t buffer_size)
 
     result = snprintf(buffer + written, buffer_size - written,
                       "Parameters:\n"
-                      "  Reset Potential: %.2f mV\n"
-                      "  Threshold: %.2f mV\n"
-                      "  Leak Rate: %.2f\n"
-                      "  Refractory: %d steps\n\n",
-                      (double) global_network.topology.reset_potential,
-                      (double) global_network.topology.threshold,
-                      (double) global_network.topology.leak_rate,
-                      (int) global_network.topology.refractory_length);
+                      "  Reset Potential: %.2f mV\n\n",
+                      (double) global_network.topology.reset_potential);
     if (result < 0) return written;
     written += (size_t)result;
 

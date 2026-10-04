@@ -57,8 +57,11 @@ This implementation complies with:
 git clone git@github.com:gnu-ai/neuron-translator.git
 cd neuron-translator
 
-# Compile
+# Build with the autotools chain shared by the whole GNU AI stack
+./autogen.sh
+./configure
 make
+make check          # CLI conformance test (--version / --help)
 
 # Install
 sudo make install
@@ -71,6 +74,14 @@ sudo settrans -cg /llm /hurd/sigmoid-neuron-translator
 
 # Optional: allow writes without sudo (the node is owned by root)
 sudo chmod 666 /llm
+```
+
+The translator also answers the GNU base commands like any other
+GNU tool:
+
+```bash
+sigmoid-neuron-translator --version
+sigmoid-neuron-translator --help
 ```
 
 ### Writing commands to the translator
@@ -90,6 +101,39 @@ Or run `sudo chmod 666 /llm` once, then plain redirection works:
 echo '3,5,2' > /llm
 ```
 
+## Scope: an inference engine, not a trainer
+
+This translator is the **compute unit** of the GNU AI stack: it turns a
+topology, a set of weights and an input vector into an output vector,
+by plain POSIX reads and writes. It contains **no training step** —
+nothing in this repository ever changes a weight after
+initialization. What the weights *are* therefore matters as much as
+what the code does with them:
+
+- **A fresh mount carries untrained weights.** `network_init()` seeds
+  every weight deterministically from its index
+  (`((i * 2654435761) & 0x7FFFFF) / 0x7FFFFF * 0.4 - 0.2`, i.e. a
+  fixed pseudo-random value in [-0.2, 0.2]). This is a **wiring
+  placeholder**, reproducible across mounts, so that the stack can be
+  exercised end to end (topology in, output out) — but the outputs are
+  noise. N instances mounted by the orchestrator each vote on their
+  own noise until real weights are loaded.
+- **Meaningful weights come from a `.nn` file**, loaded with the
+  `load <file>` command. A `.nn` file is produced either by the
+  `save <file>` command of another instance, or by an **external
+  trainer** that emits the documented format (see *The .nn model
+  format* below). No trainer lives in this repository by design:
+  training is a separate concern of the stack (the orchestrator
+  archives training data through data-base-translator; the component
+  that consumes it to produce `.nn` files is specified there, not
+  here).
+
+If the stack is mounted and driven without loading weights, the
+compute claim is limited to "the plumbing works": every translator
+keeps its structural guarantees (fault isolation, auditability,
+composition, replayability of the *same* numbers), and the numbers
+themselves remain pseudo-random until a trained file is loaded.
+
 ## Usage
 
 ### Reading Translator Status
@@ -101,7 +145,7 @@ cat /llm
 
 Output includes:
 - Network topology (layer sizes)
-- Neuron parameters (reset potential, threshold, leak rate, refractory length)
+- Initial voltage parameter (reset potential)
 - Memory usage
 - Statistics (forward passes, neuron activations)
 - Current output values
@@ -130,6 +174,71 @@ echo '0.5,0.3,0.8,0.1,0.9,0.2,0.4,0.6,0.0,0.7' | sudo tee /llm
 ```
 
 The input must match the number of neurons in the input layer. When input is provided, the forward pass is automatically executed, and the output is available for reading.
+
+### Saving and Loading Weights
+
+```bash
+# Write the current network (topology + weights) to a .nn file
+echo 'save /tmp/model.nn' | sudo tee /llm
+
+# Load a trained (or saved) network from a .nn file
+echo 'load /tmp/model.nn' | sudo tee /llm
+
+# Re-seed the scratch state (voltages, counters) without touching
+# the weights
+echo 'reset' | sudo tee /llm
+```
+
+`load` is the only way a weight ever changes after `network_init()`.
+A failed or inconsistent load leaves the previously mounted network
+untouched (the load is transactional: everything is validated into
+local state before being committed).
+
+### The .nn Model Format (v2)
+
+The format is the contract between this translator and any external
+trainer: anything that writes this layout produces a loadable
+network. The file is the in-memory layout of the running program
+written out field by field, so on a given platform it is fixed and
+exact; the canonical platform is 64-bit little-endian Hurd (x86_64).
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | magic `0x4E455552` (`'NEUR'`, little-endian) |
+| 4 | 2 | format version, `2` (uint16; version 1 files are rejected) |
+| 6 | 1 | `layer_count` (2..8) |
+| 7 | 1 | (alignment padding) |
+| 8 | 16 | `layer_sizes[8]` (uint16 each, first `layer_count` used, none 0 or > 8192) |
+| 24 | 2 | `input_size` (must equal `layer_sizes[0]`) |
+| 26 | 2 | `output_size` (must equal `layer_sizes[layer_count-1]`) |
+| 28 | 2 | (alignment padding) |
+| 30 | 4 | `reset_potential` (float32; initial scratch voltage) |
+| 34 | 4 | (struct padding, 3 bytes + alignment) |
+| 38 | 8 | `total_neurons` (size_t; must match the recomputed value) |
+| 46 | 8 | `total_weights` (size_t; recomputed and checked) |
+| 54 | 8 | `total_biases` (size_t; recomputed and checked) |
+| 62 | 8*layer_count | `layer_offsets` (size_t each) |
+| .. | 8*(layer_count-1) | `weight_offsets` (size_t each) |
+| .. | 8*layer_count | `bias_offsets` (size_t each) |
+| .. | 4*total_neurons | `voltages` (float32 each; scratch state) |
+| .. | 4*total_weights | `weights` (float32 each) |
+| .. | 4*total_biases | `biases` (float32 each) |
+
+(The `NetworkTopology` struct occupies bytes 6..37 — its measured
+layout on 64-bit little-endian is `sizeof == 32` with `layer_count`
+at 0, `layer_sizes` at 2, `input_size` at 18, `output_size` at 20,
+`reset_potential` at 24.)
+
+Key rules, enforced by `network_load()`:
+
+- the totals, offsets and sizes in the file are **never trusted**:
+  they are recomputed from `layer_sizes` and must match exactly;
+- upper limits bound the damage a hostile file can request
+  (16M neurons, 256M weights);
+- the weight matrix of layer `i` (1-based, hidden/output layers) is
+  a row-major `layer_sizes[i] * layer_sizes[i-1]` block, immediately
+  followed by the next layer's block; the bias vector of layer `i`
+  has `layer_sizes[i]` entries.
 
 ### Example Session
 
@@ -193,12 +302,15 @@ Key optimizations:
 
 ### Neuron Parameters
 
-- **Reset Potential**: -80.0 mV (biologically plausible)
-- **Threshold**: -55.0 mV (firing threshold)
-- **Leak Rate**: 0.1 (voltage decay rate)
-- **Refractory Length**: 5 timesteps (post-spike silence)
+The model has a single parameter:
 
-These can be adjusted in the code if needed.
+- **Reset Potential**: -80.0 mV — the value that fills the scratch
+  voltage array at init and reset time.
+
+Earlier revisions documented a spiking model (threshold -55 mV, leak
+0.1, refractory 5).  Those parameters were never read by the forward
+pass, which is and always was a plain sigmoid feedforward; they were
+removed in `.nn` format version 2 (see *The .nn Model Format*).
 
 ## Memory Usage Examples
 
@@ -211,37 +323,37 @@ These can be adjusted in the code if needed.
 
 ## Files
 
-- `sigmoid-neuron-translator.c` - Main translator source code (47KB, 1400+ lines)
-- `Makefile` - Compilation and installation
-- `README.md` - This documentation
-- `LICENSE` - GNU GPLv3 license
+- `src/main-hurd.c` — entry point on GNU/Hurd (trivfs startup, argp)
+- `src/main.c` — verification entry point for non-Hurd POSIX systems
+- `src/neuron.c` — the compute core: init, forward pass, save/load
+- `src/trivfs-hooks.c` — the trivfs server (reads, writes, status)
+- `include/neuron.h` — the data structures and the `.nn` format constants
+- `configure.ac`, `Makefile.am`, `src/Makefile.am`, `tests/Makefile.am` — the autotools build
+- `README.md` — this documentation
+- `LICENSE` — GNU GPLv3 license
 
 ## Compilation
 
 The code uses:
-- **C23 standard** (compatible with C11 for Hurd)
+- **C23 standard** (detected by configure: `-std=c23` or `-std=c2x`)
 - **POSIX compliance** for portability
-- **Hurd trivfs** for translator interface
+- **Hurd trivfs** for the translator interface
 - **GNU Mach IPC** for inter-process communication
 
-### Compilation Command
+### Build Commands
 
 ```bash
-gcc -std=c23 -Wall -Wextra -pedantic -O3 -march=native \
-    -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L \
-    -o sigmoid-neuron-translator sigmoid-neuron-translator.c \
-    -ltrivfs -lhurdfs -lports -lshouldbeinlibc -lm -lpthread
+./autogen.sh   # autoreconf, run once after cloning
+./configure    # picks the right main for the host (Hurd or not)
+make           # builds sigmoid-neuron-translator
+make check     # runs the CLI conformance test (--version/--help)
+make install   # installs to /hurd/
 ```
 
-### Makefile Targets
-
-```bash
-make          # Build the translator
-make install  # Install to /hurd/
-make uninstall # Remove from /hurd/
-make clean    # Clean build artifacts
-make help     # Show usage information
-```
+On GNU/Hurd the binary is the real translator (main-hurd.c linked
+against `-ltrivfs -lfshelp -lports -lshouldbeinlibc`); on any other
+POSIX system the same name builds the verification binary driven by
+main.c, so the code compiles and the tests run everywhere.
 
 ## Development
 
@@ -282,53 +394,18 @@ sudo make install
 
 ### Cross-Compilation (Advanced)
 
-For cross-compiling from Linux to Hurd:
+The build system is autotools, so cross-building from Linux is a
+cross toolchain plus the usual triple:
 
 ```bash
-# Install cross-compiler (Debian/Ubuntu)
-sudo apt-get install gcc-i686-unknown-hurd
-
-# Cross-compile
-i686-unknown-hurd-gcc -std=c23 -O3 \
-    -o sigmoid-neuron-translator sigmoid-neuron-translator.c \
-    -ltrivfs -lhurdfs -lports -lshouldbeinlibc -lm
+./autogen.sh
+./configure --host=x86_64-gnu   # with the matching cross toolchain
+make
 ```
 
-Note: Cross-compilation to Hurd requires nightly Rust with `-Z build-std` for the standard library.
-
-## Bug Fixes Implemented
-
-Based on Sylvia-27's analysis:
-
-### 1. Voltage Reset After Spike (Critical)
-**Issue**: Original code set voltage to SPIKE_AMPLITUDE but never reset to reset_potential, causing infinite spiking.
-
-**Fix**: Explicitly reset voltage to reset_potential after spike detection.
-
-### 2. Full Hurd Translator Implementation
-**Issue**: Hurd layer (Mach IPC + trivfs) was stubbed out.
-
-**Fix**: Complete implementation with proper trivfs integration, correct function signatures, and proper type declarations.
-
-### 3. Correct settrans Syntax
-**Issue**: README had inverted syntax: `settrans -c <translator> <node>`
-
-**Fix**: Correct syntax: `settrans -c <node> <translator>`
-
-### 4. Type Compatibility
-**Issue**: Missing type definitions (pthread_spinlock_t, loff_t, blksize_t, ino64_t)
-
-**Fix**: Added proper includes (`<pthread.h>`, etc.) and used compatible types (off_t instead of loff_t where needed).
-
-### 5. Function Signature Mismatches
-**Issue**: trivfs function signatures didn't match Hurd's expectations.
-
-**Fix**: Corrected all function signatures to match trivfs.h declarations.
-
-### 6. Build Target Correction
-**Issue**: Used `i686-unknown-gnu` which is not a valid Rust target.
-
-**Fix**: Correct targets are `i686-unknown-hurd-gnu` and `x86_64-unknown-hurd-gnu`.
+Cross-compiling to GNU/Hurd also requires MIG and the Hurd/glibc
+headers for the target; building natively on a Hurd system (as in
+the VM instructions above) is the supported path.
 
 ## Code Style
 

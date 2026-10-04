@@ -37,9 +37,14 @@
  *****************************************************************************/
 /* --- Model file format --- */
 /* Every .nn file starts with a magic number and a format version, so
- * network_load() can reject files it does not know how to read. */
+ * network_load() can reject files it does not know how to read.
+ *
+ * Version 2 removed the unused spiking-model fields (threshold, leak
+ * rate, refractory length) from NetworkTopology: the model is a pure
+ * sigmoid feedforward pass and these parameters were never read by
+ * network_forward().  Files written by version 1 are rejected. */
 #define NET_FILE_MAGIC     0x4E455552u   /* 'N' 'E' 'U' 'R' */
-#define NET_FILE_VERSION   1u
+#define NET_FILE_VERSION   2u
 
 /* --- Safe upper limits (protection against fuzzed/malicious files) ---
  * A model file is untrusted input: these ceilings bound how much memory
@@ -57,11 +62,13 @@
 /** SIMD alignment for memory allocation */
 #define SIMD_ALIGNMENT 16
 
-/** Neuron parameters (biologically plausible values in millivolts) */
+/** Initial neuron voltage (millivolts).
+ * The voltages array is scratch state between passes; this constant
+ * fills it at init and reset time.  It is NOT a spiking mechanism:
+ * the model is a pure sigmoid feedforward pass (see network_forward
+ * in src/neuron.c), so no threshold/leak/refractory parameters
+ * exist. */
 #define RESET_POTENTIAL (-80.0f)
-#define THRESHOLD (-55.0f)
-#define LEAK_RATE 0.1f
-#define REFRACTORY_LENGTH 5
 
 /** Default network topology: input=10, hidden=20, output=5 */
 #define DEFAULT_LAYER_SIZES {10, 20, 5}
@@ -76,17 +83,19 @@
  *                                                                           *
  *****************************************************************************/
 
-/** Network topology configuration */
+/** Network topology configuration.
+ * This structure is serialized as-is into .nn files (see
+ * network_save/network_load), so its layout is part of the file
+ * format: NET_FILE_VERSION is bumped whenever it changes. */
 typedef struct NetworkTopology {
     uint8_t layer_count;            /**< Number of layers (2-8) */
     uint16_t layer_sizes[MAX_LAYERS]; /**< Neurons per layer */
     uint16_t input_size;             /**< Input layer size */
     uint16_t output_size;            /**< Output layer size */
-    float reset_potential;          /**< Resting membrane potential (mV) */
-    float threshold;                /**< Firing threshold (mV) */
-    float leak_rate;                /**< Voltage decay rate */
-    uint8_t refractory_length;      /**< Post-spike silence period */
-    uint8_t padding[3];              /**< Structure padding for alignment */
+    float reset_potential;          /**< Initial voltage of the scratch
+                                         array (mV); see RESET_POTENTIAL */
+    uint8_t padding[3];              /**< Keep the struct 4-byte aligned
+                                         and the layout explicit */
 } NetworkTopology;
 
 /** Compact neural network with contiguous memory allocation */

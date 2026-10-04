@@ -85,3 +85,7 @@ src/sigmoid-neuron-translator
 
 # Automake dir stamps
 .dirstamp
+
+# Test artifacts
+tests/test_model
+test-model.nn

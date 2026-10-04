@@ -10,6 +10,44 @@ either version 3 of the License, or (at your option) any later version.
 
 # Changes Made to Fix Compilation on GNU/Hurd
 
+## 2026-10: inference-engine scoping, dead spiking parameters removed
+
+**Context:** a review of the public code pointed out that (a) the
+stack had no stated source of weights — `network_init()` seeds every
+weight pseudo-randomly and nothing trains them, so `/llm1..N` vote
+on noise until a trained file is loaded; and (b) README.md still
+documented a spiking model (threshold, leak rate, refractory length)
+while `network_forward()` is and always was a plain sigmoid
+feedforward that never reads those parameters.
+
+**Changes:**
+
+- README.md gains a *Scope: an inference engine, not a trainer*
+  section: the pseudo-random initialization (formula and range) is
+  documented as a wiring placeholder, meaningful weights come from
+  `.nn` files loaded with the `load` command, and no trainer lives
+  in this repository — training is a separate concern of the stack.
+- README.md documents the previously undocumented `save`, `load` and
+  `reset` commands, and specifies the `.nn` model format (v2) as the
+  contract an external trainer implements, field by field with
+  offsets.
+- The unused spiking fields (`threshold`, `leak_rate`,
+  `refractory_length`) are removed from `NetworkTopology`, from
+  `network_init()` and from the trivfs status view.  They were set
+  and printed but never read.
+- `NET_FILE_VERSION` is bumped from 1 to 2: the serialized topology
+  changed, and version 1 files are rejected by `network_load()`.
+
+**Compatibility:** `.nn` files written before this change (format
+version 1) are rejected; re-create them with the new build.
+
+**Build instructions in README.md updated** to the autotools chain
+(`./autogen.sh && ./configure && make`) and the modular `src/` +
+`include/` layout; the obsolete monolithic compile command and the
+"Bug Fixes Implemented" section (which described a spike-detection
+code path that no longer exists) were removed — the history lives
+in this file.
+
 ## Summary
 
 Fixed all compilation errors for the sigmoid neuron translator on GNU/Hurd. The code now compiles successfully with `make` on a Hurd VM and is ready for deployment as a Hurd translator.
