@@ -13,9 +13,12 @@ TESTS = test_cli.sh $(check_PROGRAMS)
 
 EXTRA_DIST = test_cli.sh
 
-check_PROGRAMS = test_model
+check_PROGRAMS = test_model test_regressions
 
 # neuron.c is the whole compute core; the test drives it directly,
 # the way an external trainer would drive the .nn contract.
 test_model_SOURCES = test_model.c $(top_srcdir)/src/neuron.c
 test_model_LDADD = -lm
+test_regressions_SOURCES = test_regressions.c $(top_srcdir)/src/neuron.c \
+                          $(top_srcdir)/src/commands.c
+test_regressions_LDADD = -lm

@@ -1,31 +1,26 @@
-<!--
-SPDX-License-Identifier: GPL-3.0-or-later
-Copyright (C) 2026 Claire Ivanenka <claire@gnu-ai.org>
-
-This file is part of the Sigmoid Neuron Translator and is free software:
-you can redistribute it and/or modify it under the terms of the GNU
-General Public License as published by the Free Software Foundation,
-either version 3 of the License, or (at your option) any later version.
--->
 
 # Sigmoid Neuron Translator for GNU Hurd
 
-A **memory-efficient, CPU-optimized** sigmoid neuron translator for GNU Hurd, specifically designed to handle **large numbers of neurons** (100K+) with **minimal memory footprint** and **low CPU usage**. This implementation follows the **Claude Delannoy** style with extensive English comments.
+A sigmoid feedforward network exposed as a GNU Hurd translator. The current
+implementation supports 2–8 layers, up to 8,192 neurons per layer and 256M
+weights. Version 0.1.0 is undergoing correctness hardening; it is not a
+validated production release. Linux tests exercise the compute and command
+cores; they do not validate Mach RPC integration.
 
 ## Features
 
 ### Memory Efficiency
-- **float32 storage**: All numeric values use 4-byte float instead of 8-byte double
+- **float32 storage**: Parameters and activations use float32; dot products accumulate in double to avoid intermediate overflow
 - **Contiguous allocation**: Single memory block for entire network (arena allocator)
 - **Compact structures**: Minimum padding, optimal data packing
-- **16-byte alignment**: SIMD-compatible memory layout
-- **Scalable**: Linear memory growth with network size
+- **16-byte arena alignment**: Individual subarrays are not guaranteed SIMD alignment
+- **Memory growth**: Proportional to neurons plus weights; dense weights scale as the product of adjacent layer widths
 
 ### CPU Efficiency  
 - **Cache-friendly**: Sequential memory access patterns
 - **Minimal branching**: Predictable execution in hot loops
 - **Inline functions**: No call overhead for critical functions
-- **No runtime allocation**: All memory pre-allocated at initialization
+- **Allocation-free forward pass**: Commands, snapshots and persistence may allocate
 - **Optimized forward pass**: Hand-tuned for performance
 
 ### Neuron Model
@@ -46,7 +41,7 @@ This implementation complies with:
 
 ### Prerequisites
 - GNU/Hurd system (Debian GNU/Hurd recommended)
-- GCC (tested with GCC 12+)
+- GCC 13+ with C23 support (`-std=c23` or `-std=c2x`)
 - Hurd development libraries
 - Mach IPC headers
 
@@ -152,12 +147,21 @@ Output includes:
 
 ### Configuring the Network
 
+Prefer explicit commands: `topology 10,20,5` and `input 1,2,...`.
+Legacy numeric commands remain topology-first for compatibility: a vector
+of positive integers can otherwise be mistaken for a topology.
+
+Each write must contain exactly one complete command (up to 1 MiB).
+Oversized writes, embedded NULs, multiple lines, extra values and non-finite
+inputs are rejected. Clients sending large vectors must issue one write and
+check its result; a stream split across writes is not a command-framing protocol.
+
 ```bash
 # Set topology (comma or space separated)
-echo '10,20,5' | sudo tee /llm
+echo 'topology 10,20,5' | sudo tee /llm
 
 # Or with spaces
-echo '10 20 5' | sudo tee /llm
+echo 'topology 10 20 5' | sudo tee /llm
 ```
 
 This creates a network with:
@@ -170,7 +174,7 @@ This creates a network with:
 ```bash
 # Set input values (comma or space separated)
 # The number of values must exactly match the input layer size
-echo '0.5,0.3,0.8,0.1,0.9,0.2,0.4,0.6,0.0,0.7' | sudo tee /llm
+echo 'input 0.5,0.3,0.8,0.1,0.9,0.2,0.4,0.6,0.0,0.7' | sudo tee /llm
 ```
 
 The input must match the number of neurons in the input layer. When input is provided, the forward pass is automatically executed, and the output is available for reading.
@@ -194,6 +198,16 @@ A failed or inconsistent load leaves the previously mounted network
 untouched (the load is transactional: everything is validated into
 local state before being committed).
 
+Topology changes are transactional as well. Reset clears inputs, outputs and
+counters, retaining weights and biases; hidden scratch voltages use the reset
+potential. Loading restores input/output buffers from the saved voltage arrays.
+Save writes a private (0600) temporary regular file, checks flush/close errors,
+then atomically replaces the target. Devices and symlink save targets are
+rejected. Load accepts regular files only. On Hurd, `save` and `load` require
+the translator owner's UID or root, because paths resolve with the server's
+credentials. Other writers can operate the shared network but cannot use its
+filesystem privileges.
+
 ### The .nn Model Format (v2)
 
 The format is the contract between this translator and any external
@@ -204,7 +218,7 @@ exact; the canonical platform is 64-bit little-endian Hurd (x86_64).
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 4 | magic `0x4E455552` (`'NEUR'`, little-endian) |
+| 0 | 4 | magic `0x4E455552` (bytes `52 55 45 4e` on little-endian) |
 | 4 | 2 | format version, `2` (uint16; version 1 files are rejected) |
 | 6 | 1 | `layer_count` (2..8) |
 | 7 | 1 | (alignment padding) |
@@ -316,16 +330,17 @@ removed in `.nn` format version 2 (see *The .nn Model Format*).
 
 | Network Topology | Neurons | Weights | Memory Usage |
 |------------------|---------|--------|--------------|
-| 10-20-5 | 35 | 250 | ~2 KB |
-| 784-256-128-10 | 1,178 | 230,400 | ~930 KB |
-| 1000-500-100 | 1,600 | 600,000 | ~2.3 MB |
-| 10000-1000-100 | 11,100 | 10,100,000 | ~80 MB |
+| 10-20-5 | 35 | 300 | 1,500 bytes |
+| 784-256-128-10 | 1,178 | 234,752 | ~926 KiB |
+| 1000-500-100 | 1,600 | 550,000 | ~2.11 MiB |
+| 8192-1000-100 | 9,292 | 8,292,000 | ~31.7 MiB |
 
 ## Files
 
 - `src/main-hurd.c` — entry point on GNU/Hurd (trivfs startup, argp)
 - `src/main.c` — verification entry point for non-Hurd POSIX systems
 - `src/neuron.c` — the compute core: init, forward pass, save/load
+- `src/commands.c` — portable command parsing and bounded status formatting
 - `src/trivfs-hooks.c` — the trivfs server (reads, writes, status)
 - `include/neuron.h` — the data structures and the `.nn` format constants
 - `configure.ac`, `Makefile.am`, `src/Makefile.am`, `tests/Makefile.am` — the autotools build
@@ -346,8 +361,9 @@ The code uses:
 ./autogen.sh   # autoreconf, run once after cloning
 ./configure    # picks the right main for the host (Hurd or not)
 make           # builds sigmoid-neuron-translator
-make check     # runs the CLI conformance test (--version/--help)
-make install   # installs to /hurd/
+make check     # CLI, model and regression suites
+make distcheck # build and test the distributable source archive
+make install   # /hurd on Hurd; prefix/bin on other hosts
 ```
 
 On GNU/Hurd the binary is the real translator (main-hurd.c linked
@@ -433,11 +449,11 @@ This implementation satisfies the requirements from [https://gnu-ai.org/doku.php
 - **Memory efficiency**: Single contiguous allocation, float32 storage
 - **CPU efficiency**: Optimized forward pass, cache-friendly access
 - **Scalability**: Supports thousands of neurons
-- **Multi-task and multi-user operation**: the translator must serve several
-  users **simultaneously** — concurrent `write` commands and `read` requests
-  on `/llm` are serialized by a lock, each `read` returns one consistent
-  snapshot (topology and outputs never mixed mid-pass), and no unprotected
-  global state may serialize users with each other
+- **Multiple callers**: a single-threaded RPC loop serializes commands on one
+  shared network. Each open reader retains a snapshot across partial reads;
+  seek to zero or reopen to refresh it. A successful write refreshes that
+  handle's snapshot. Separate writers are not isolated inference sessions;
+  clients must coordinate write/read pairs or use separate translator instances.
 - **POSIX compliance**: Follows POSIX standards
 - **C standard compliance**: Uses C23 standard
 - **Extensive documentation**: Claude Delannoy style comments

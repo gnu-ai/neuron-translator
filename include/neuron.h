@@ -134,6 +134,8 @@ typedef struct CompactNeuralNetwork {
 
 /**
  * @brief Initialize the neural network with specified topology
+ * Zero-initialize the object before first use. Reinitialization is
+ * transactional: failures preserve the previous network.
  * 
  * @param net         Pointer to network structure
  * @param layer_count Number of layers (2-8)

@@ -1,11 +1,4 @@
-<!--
-SPDX-License-Identifier: GPL-3.0-or-later
-Copyright (C) 2026 Claire Ivanenka <claire@gnu-ai.org>
 
-Feuille de route consolidée de la pile GNU AI, dérivée des PLAN.md
-de chaque dépôt. Ordre d'écriture des translators dicté par les
-dépendances croisées (section « Jalons » de chaque PLAN.md).
--->
 
 # GNU AI — ToDo consolidé (pile complète)
 
@@ -13,7 +6,7 @@ dépendances croisées (section « Jalons » de chaque PLAN.md).
 
 | Dépôt | État | Phase courante |
 |---|---|---|
-| `neuron-translator` | Terminé (v1.0, src + tests) | — |
+| `neuron-translator` | 0.1.0 : durcissement en cours (revue 2026-11) | Corrections et tests Linux ; intégration Hurd non revalidée |
 | `mistral-vm-debian-hurd` | Terminé (sandbox CI QEMU) | — |
 | `httpfs-translator` | En cours : phases 2–3 faites (transport + htmlfs/jsonfs/csvfs) | 1 (CI) + fin 3 (cluster) + 4 |
 | `data-base-translator` | Pas de code (PLAN.md seulement) | **0 à coder en premier** |
