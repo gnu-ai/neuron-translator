@@ -1,14 +1,13 @@
-<!--
-SPDX-License-Identifier: GPL-3.0-or-later
-Copyright (C) 2026 Claire Ivanenka <claire@gnu-ai.org>
-
-This file is part of the Sigmoid Neuron Translator and is free software:
-you can redistribute it and/or modify it under the terms of the GNU
-General Public License as published by the Free Software Foundation,
-either version 3 of the License, or (at your option) any later version.
--->
 
 # Sigmoid Neuron Translator — Projet et feuille de route
+
+> Mise à jour 2026-11 : la version déclarée reste **0.1.0**. Les mentions
+> « v1.0 terminée » ci-dessous décrivent l'ancien bilan, invalidé par la
+> revue de code. Le durcissement corrige les offsets des modèles, les buffers,
+> les commandes et la persistance ; les tests Linux et `distcheck` couvrent
+> ces chemins. Aucune validation QEMU/Hurd n'est effectuée dans cette passe.
+> Le serveur reste mono-thread, avec snapshots par ouverture et état réseau
+> partagé. Le README et CHANGES.md décrivent le contrat actuel.
 
 `neuron-translator` est l'**unité de calcul** de la pile GNU AI pour
 GNU/Hurd : un réseau de neurones sigmoïdes feedforward exposé comme un

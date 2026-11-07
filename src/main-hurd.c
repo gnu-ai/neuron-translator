@@ -10,7 +10,9 @@
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  */
-
+ /*
+  * Developer: Alperen ERKAN 2026 <erkan [at] gnu-ai.org>
+ */
 /** @file main-hurd.c
  *  @brief Entry point for the sigmoid neuron translator on GNU/Hurd
  *
@@ -38,6 +40,12 @@
  * Define it the SAME way here: C tolerates the identical
  * redefinition, so this keeps compiling on fixed systems. */
 
+#ifdef HAVE_CONFIG_H
+#include <config.h>
+#endif
+#include "neuron.h"
+#include <math.h>
+#include <errno.h>
 #include <mach/port.h>                  /* mach_port_t */
 typedef mach_port_t *processor_name_array_t;
 
@@ -55,7 +63,7 @@ typedef mach_port_t *processor_name_array_t;
  * which holds the port buckets libtrivfs serves our RPCs through. */
 struct trivfs_control *fsys;
 
-const char *argp_program_version = "sigmoid-neuron-translator (GNU AI) 0.1.0";
+const char *argp_program_version = "sigmoid-neuron-translator (GNU AI) " VERSION;
 const char *argp_program_bug_address = "<claire@gnu-ai.org>";
 static char doc[] = "GNU/Hurd sigmoid neuron translator.";
 
@@ -101,7 +109,13 @@ parse_opt (int key, char *arg, struct argp_state *state)
   switch (key)
     {
     case 'b':
-      global_bias = atof (arg);
+      {
+        char *end;
+        errno = 0;
+        global_bias = strtof(arg, &end);
+        if (end == arg || *end || errno == ERANGE || !isfinite(global_bias))
+          argp_error(state, "invalid bias: %s", arg);
+      }
       break;
     case 'h':
       /* The same standard help as --help, on stdout, exit 0. */
@@ -126,6 +140,12 @@ main (int argc, char *argv[])
   /* Parse the command line: settrans passes any arguments that follow
      the translator path on to us. */
   argp_parse (&argp, argc, argv, 0, 0, 0);
+  extern CompactNeuralNetwork global_network;
+  const uint16_t layers[] = DEFAULT_LAYER_SIZES;
+  if (network_init(&global_network, DEFAULT_LAYER_COUNT, layers) != 0)
+    error(1, errno, "Initializing network");
+  for (size_t i = 0; i < global_network.total_biases; i++)
+    global_network.biases[i] = global_bias;
 
   /* Get the bootstrap port that the parent (settrans) handed us */
   task_get_bootstrap_port (mach_task_self (), &bootstrap);

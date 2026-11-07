@@ -10,7 +10,9 @@
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  */
-
+ /*
+  * Developer: Alperen ERKAN 2026 <erkan [at] gnu-ai.org>
+ */
 /** @file trivfs-hooks.c
  *  @brief Implementation of the trivfs server routines
  *
@@ -52,6 +54,9 @@ typedef mach_port_t *processor_name_array_t;
 
 #include "trivfs-hooks.h"
 #include "neuron.h"
+#include "commands.h"
+#include <stdint.h>
+#include <ctype.h>
 #include "debug.h"
 
 /*****************************************************************************
@@ -77,6 +82,7 @@ mach_port_t trivfs_control = MACH_PORT_NULL;
 #include <hurd/trivfs.h>
 #include <hurd/fsys.h>
 #include <hurd/hurd_types.h>
+#include <hurd/idvec.h>
 
 /*****************************************************************************
  *  TRIVFS VARIABLES
@@ -105,6 +111,8 @@ int trivfs_allow_open = O_READ | O_WRITE;
 struct peropen_data
 {
     loff_t file_pointer;    /* Current read/write position */
+    char *snapshot;
+    size_t snapshot_length;
 };
 
 static error_t
@@ -117,6 +125,8 @@ peropen_create(struct trivfs_peropen *po)
 static void
 peropen_destroy(struct trivfs_peropen *po)
 {
+    struct peropen_data *pod = po->hook;
+    if (pod) free(pod->snapshot);
     free(po->hook);
     po->hook = NULL;
 }
@@ -134,116 +144,28 @@ translator_init(void)
  *  NETWORK ACCESS
  *****************************************************************************/
 
-/* Size of the buffer used to render the status text */
-#define INFO_BUFFER_SIZE 4096
-
 /* Initialize the network with the default topology on first use */
-static void
+static error_t
 ensure_network(void)
 {
     if (!global_network.initialized) {
         uint16_t layers[MAX_LAYERS] = DEFAULT_LAYER_SIZES;
         if (network_init(&global_network, DEFAULT_LAYER_COUNT, layers) != 0) {
-            log_debug_message("[DEBUG] network_init failed");
+            return errno;
         }
     }
+    return 0;
 }
 
-/* Render the status text served by reads, return its length.
- * The text is always NUL-terminated within the buffer. */
-static size_t
-build_info_text(char *buffer, size_t buffer_size)
+/* Freeze a complete status view until this open is rewound or written. */
+static error_t
+ensure_snapshot(struct peropen_data *pod)
 {
-    size_t written = 0;
-    int result;
-
-    result = snprintf(buffer, buffer_size,
-                      "LLM Sigmoid Neuron Translator - GNU Hurd\n"
-                      "===========================================\n\n");
-    if (result < 0) return 0;
-    written = (size_t)result;
-
-    result = snprintf(buffer + written, buffer_size - written,
-                      "Network: %d layers",
-                      (int) global_network.topology.layer_count);
-    if (result < 0) return written;
-    written += (size_t)result;
-
-    for (uint8_t i = 0; i < global_network.topology.layer_count; i++) {
-        result = snprintf(buffer + written, buffer_size - written,
-                          ", %d", (int) global_network.topology.layer_sizes[i]);
-        if (result < 0) return written;
-        written += (size_t)result;
-    }
-
-    result = snprintf(buffer + written, buffer_size - written, "\n\n");
-    if (result < 0) return written;
-    written += (size_t)result;
-
-    result = snprintf(buffer + written, buffer_size - written,
-                      "Memory: %.2f KB, Neurons: %zu, Weights: %zu\n\n",
-                      (double) global_network.memory_block_size / 1024.0,
-                      global_network.total_neurons,
-                      global_network.total_weights);
-    if (result < 0) return written;
-    written += (size_t)result;
-
-    result = snprintf(buffer + written, buffer_size - written,
-                      "Parameters:\n"
-                      "  Reset Potential: %.2f mV\n\n",
-                      (double) global_network.topology.reset_potential);
-    if (result < 0) return written;
-    written += (size_t)result;
-
-    result = snprintf(buffer + written, buffer_size - written, "Output:\n");
-    if (result < 0) return written;
-    written += (size_t)result;
-
-    for (size_t i = 0; i < global_network.topology.output_size; i++) {
-        result = snprintf(buffer + written, buffer_size - written,
-                          "  [%zu]: %.6f\n", i,
-                          (double) global_network.output_buffer[i]);
-        if (result < 0) return written;
-        written += (size_t)result;
-    }
-
-    result = snprintf(buffer + written, buffer_size - written,
-                      "\nStatistics:\n"
-                      "  Forward Passes: %zu\n"
-                      "  Neuron Activations: %zu\n\n",
-                      global_network.forward_pass_count,
-                      global_network.neuron_activations);
-    if (result < 0) return written;
-    written += (size_t)result;
-
-    result = snprintf(buffer + written, buffer_size - written,
-                      "Usage:\n"
-                      "  cat /llm                          - Show info\n"
-                      "  echo '10,20,5' | sudo tee /llm  - Set topology\n"
-                      "  echo 'v1,...,v%u' | sudo tee /llm - Set input (%u values)\n"
-                      "  echo 'reset' | sudo tee /llm      - Reset network state\n"
-                      "  echo 'save /tmp/net.bin' | sudo tee /llm - Save network\n"
-                      "  echo 'load /tmp/net.bin' | sudo tee /llm - Load network\n"
-                      "(node owned by root: use '| sudo tee', or 'sudo chmod 666 /llm' once)\n",
-                      (unsigned) global_network.topology.input_size,
-                      (unsigned) global_network.topology.input_size);
-    if (result < 0) return written;
-    written += (size_t)result;
-
-    if (written >= buffer_size) {
-        written = buffer_size - 1;
-    }
-    buffer[written] = '\0';
-
-    return written;
-}
-
-/* Current length of the status text */
-static size_t
-info_text_size(void)
-{
-    char buffer[INFO_BUFFER_SIZE];
-    return build_info_text(buffer, sizeof buffer);
+    if (!pod) return EIO;
+    if (pod->snapshot) return 0;
+    error_t error = ensure_network();
+    if (error) return error;
+    return network_status(&global_network, &pod->snapshot, &pod->snapshot_length);
 }
 
 /*****************************************************************************
@@ -257,11 +179,10 @@ info_text_size(void)
 void
 trivfs_modify_stat(struct trivfs_protid *cred, io_statbuf_t *st)
 {
-    (void) cred;
-
     st->st_mode &= ~((mode_t) S_IFMT);
     st->st_mode |= S_IFREG;
-    st->st_size = (loff_t) info_text_size();
+    struct peropen_data *pod = cred ? cred->po->hook : NULL;
+    st->st_size = pod && !ensure_snapshot(pod) ? (loff_t)pod->snapshot_length : 0;
 }
 
 /* Someone (settrans -g, shutdown) wants us to go away */
@@ -292,7 +213,6 @@ trivfs_S_io_read(struct trivfs_protid *cred,
                  loff_t offs,
                  vm_size_t amount)
 {
-    char buffer[INFO_BUFFER_SIZE];
     size_t text_len;
     loff_t position;
 
@@ -304,8 +224,10 @@ trivfs_S_io_read(struct trivfs_protid *cred,
     else if (!(cred->po->openmodes & O_READ))
         return EBADF;
 
-    ensure_network();
-    text_len = build_info_text(buffer, sizeof buffer);
+    struct peropen_data *pod = cred->po->hook;
+    error_t error = ensure_snapshot(pod);
+    if (error) return error;
+    text_len = pod->snapshot_length;
 
     /* Resolve the read position */
     position = offs;
@@ -314,10 +236,10 @@ trivfs_S_io_read(struct trivfs_protid *cred,
         position = pod != NULL ? pod->file_pointer : 0;
     }
     if (position < 0)
-        position = 0;
+        return EINVAL;
 
     /* End of file */
-    if ((size_t) position >= text_len || amount == 0) {
+    if ((uintmax_t) position >= text_len || amount == 0) {
         *datalen = 0;
         return 0;
     }
@@ -334,7 +256,7 @@ trivfs_S_io_read(struct trivfs_protid *cred,
             return ENOMEM;
     }
 
-    memcpy(*data, buffer + position, amount);
+    memcpy(*data, pod->snapshot + position, amount);
     *datalen = (mach_msg_type_number_t) amount;
 
     /* Advance the object-maintained file pointer */
@@ -362,7 +284,11 @@ trivfs_S_io_readable(struct trivfs_protid *cred,
     else if (!(cred->po->openmodes & O_READ))
         return EBADF;
 
-    *amount = vm_page_size;
+    struct peropen_data *pod = cred->po->hook;
+    error_t error = ensure_snapshot(pod);
+    if (error) return error;
+    *amount = (uintmax_t)pod->file_pointer < pod->snapshot_length
+        ? pod->snapshot_length - (size_t)pod->file_pointer : 0;
     return 0;
 }
 
@@ -376,9 +302,6 @@ trivfs_S_io_write(struct trivfs_protid *cred,
                   loff_t offs,
                   vm_size_t *amt)
 {
-    char temp[1024];
-    size_t len;
-
     (void) reply;
     (void) replytype;
     (void) offs;
@@ -393,71 +316,35 @@ trivfs_S_io_write(struct trivfs_protid *cred,
         return 0;
     }
 
-    ensure_network();
-
-    len = datalen;
-    if (len >= sizeof temp)
-        len = sizeof temp - 1;
-
-    memcpy(temp, data, len);
-    temp[len] = '\0';
-
-    /* Remove trailing newlines */
-    char *newline = strchr(temp, '\n');
-    if (newline != NULL) *newline = '\0';
-    newline = strchr(temp, '\r');
-    if (newline != NULL) *newline = '\0';
-
-    /* Handle commands */
-    if (strncmp(temp, "reset", 5) == 0
-        && (temp[5] == '\0' || temp[5] == ' ' || temp[5] == '\t')) {
-        network_reset(&global_network);
-        *amt = datalen;
-        return 0;
+    /* Model paths resolve under the translator's credentials, not those
+     * of a writer. Only its owner (or root) may perform filesystem I/O. */
+    const char *command = data;
+    size_t command_length = datalen;
+    while (command_length && isspace((unsigned char)*command)) {
+        command++;
+        command_length--;
     }
-
-    if (strncmp(temp, "save ", 5) == 0) {
-        char *filename = temp + 5;
-        if (*filename != '\0' && network_save(&global_network, filename)) {
-            *amt = datalen;
-            return 0;
-        }
+    if (command_length > 4 && isspace((unsigned char)command[4]) &&
+        (!memcmp(command, "save", 4) || !memcmp(command, "load", 4)) &&
+        (!cred->user || (!idvec_contains(cred->user->uids, geteuid()) &&
+                         !idvec_contains(cred->user->uids, 0)))) {
         *amt = 0;
-        return EINVAL;
-    }
-
-    if (strncmp(temp, "load ", 5) == 0) {
-        char *filename = temp + 5;
-        if (*filename != '\0' && network_load(&global_network, filename)) {
-            *amt = datalen;
-            return 0;
-        }
-        *amt = 0;
-        return EINVAL;
-    }
-
-    /* Parse a topology specification such as "10,20,5" */
-    uint16_t layers[MAX_LAYERS];
-    int layer_count = parse_config_string(temp, layers, MAX_LAYERS);
-
-    if (layer_count > 0) {
-        network_free(&global_network);
-        if (network_init(&global_network, (uint8_t) layer_count, layers) != 0) {
-            *amt = 0;
-            return EINVAL;
-        }
-        *amt = datalen;
-        return 0;
-    }
-
-    /* Parse an input vector and run a forward pass */
-    if (parse_input_string(&global_network, temp)) {
-        *amt = datalen;
-        return 0;
+        return EACCES;
     }
 
     *amt = 0;
-    return EINVAL;
+    error_t error = ensure_network();
+    if (!error) error = network_command(&global_network, data, datalen);
+    if (error) return error;
+    struct peropen_data *pod = cred->po->hook;
+    if (pod) {
+        free(pod->snapshot);
+        pod->snapshot = NULL;
+        pod->snapshot_length = 0;
+        pod->file_pointer = 0;
+    }
+    *amt = datalen;
+    return 0;
 }
 
 /* Change the current read/write offset */
@@ -481,24 +368,32 @@ trivfs_S_io_seek(struct trivfs_protid *cred,
     if (pod == NULL)
         return EOPNOTSUPP;
 
-    ensure_network();
-
+    loff_t base = 0;
     switch (whence) {
     case SEEK_SET:
         break;
     case SEEK_CUR:
-        offs += pod->file_pointer;
+        base = pod->file_pointer;
         break;
     case SEEK_END:
-        offs += (loff_t) info_text_size();
+        {
+            error_t error = ensure_snapshot(pod);
+            if (error) return error;
+            base = (loff_t)pod->snapshot_length;
+        }
         break;
     default:
         return EINVAL;
     }
 
-    if (offs < 0)
+    if (offs > INT64_MAX - base || offs < -base)
         return EINVAL;
-
+    offs += base;
+    if (offs == 0) {
+        free(pod->snapshot);
+        pod->snapshot = NULL;
+        pod->snapshot_length = 0;
+    }
     pod->file_pointer = offs;
     *new_offs = offs;
     return 0;
@@ -520,6 +415,8 @@ trivfs_S_io_select(struct trivfs_protid *cred,
 
     if (*type & ~(SELECT_READ | SELECT_WRITE))
         return EINVAL;
+    if (!(cred->po->openmodes & O_READ)) *type &= ~SELECT_READ;
+    if (!(cred->po->openmodes & O_WRITE)) *type &= ~SELECT_WRITE;
 
     return 0;
 }
@@ -550,6 +447,7 @@ trivfs_S_file_set_size(struct trivfs_protid *cred,
 
     if (size < 0)
         return EINVAL;
+    if (!(cred->po->openmodes & O_WRITE)) return EBADF;
 
     return 0;
 }
@@ -564,11 +462,11 @@ trivfs_S_io_set_all_openmodes(struct trivfs_protid *cred,
 {
     (void) reply;
     (void) replytype;
-    (void) mode;
 
     if (cred == NULL)
         return EOPNOTSUPP;
-
+    int mutable = O_APPEND | O_ASYNC | O_FSYNC | O_NONBLOCK;
+    cred->po->openmodes = (cred->po->openmodes & ~mutable) | (mode & mutable);
     return 0;
 }
 
@@ -580,11 +478,10 @@ trivfs_S_io_set_some_openmodes(struct trivfs_protid *cred,
 {
     (void) reply;
     (void) replytype;
-    (void) bits;
 
     if (cred == NULL)
         return EOPNOTSUPP;
-
+    cred->po->openmodes |= bits & (O_APPEND | O_ASYNC | O_FSYNC | O_NONBLOCK);
     return 0;
 }
 
@@ -596,11 +493,10 @@ trivfs_S_io_clear_some_openmodes(struct trivfs_protid *cred,
 {
     (void) reply;
     (void) replytype;
-    (void) bits;
 
     if (cred == NULL)
         return EOPNOTSUPP;
-
+    cred->po->openmodes &= ~(bits & (O_APPEND | O_ASYNC | O_FSYNC | O_NONBLOCK));
     return 0;
 }
 

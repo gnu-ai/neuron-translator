@@ -10,7 +10,9 @@
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  */
-
+  /*
+  * Developer: Alperen ERKAN 2026 <erkan [at] gnu-ai.org>
+ */
 /** @file neuron.c
  *  @brief Neural network implementation with memory-efficient design
  *
@@ -57,6 +59,10 @@
 #include <string.h>
 #include <math.h>
 #include <errno.h>
+#include <ctype.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
 #include "neuron.h"
 
@@ -106,7 +112,7 @@ static void aligned_free(void *ptr)
  *                                                                           *
  *****************************************************************************/
 
-int network_init(CompactNeuralNetwork *net,
+static int network_allocate(CompactNeuralNetwork *net,
                 uint8_t layer_count,
                 const uint16_t *layer_sizes)
 {
@@ -155,6 +161,12 @@ int network_init(CompactNeuralNetwork *net,
     for (uint8_t i = 1; i < layer_count; i++) {
         net->total_weights += (size_t)layer_sizes[i] * (size_t)layer_sizes[i - 1];
         net->total_biases += layer_sizes[i];
+    }
+    if (net->total_neurons > NET_MAX_TOTAL_NEURONS ||
+        net->total_weights > NET_MAX_TOTAL_WEIGHTS ||
+        net->total_biases > NET_MAX_TOTAL_BIASES) {
+        errno = EFBIG;
+        return -1;
     }
     
     /* Calculate layer offsets */
@@ -206,6 +218,21 @@ int network_init(CompactNeuralNetwork *net,
     net->input_buffer = (float *)ptr;
     ptr += input_size;
     net->output_buffer = (float *)ptr;
+    memset(net->memory_block, 0, net->memory_block_size);
+    net->initialized = true;
+    return 0;
+}
+
+/* Build locally: validation/allocation failure preserves the active model.
+ * Callers must zero-initialize a network before its first use. */
+int network_init(CompactNeuralNetwork *current, uint8_t layer_count,
+                 const uint16_t *layer_sizes)
+{
+    if (!current) { errno = EINVAL; return -1; }
+    CompactNeuralNetwork fresh = {0};
+    if (network_allocate(&fresh, layer_count, layer_sizes) != 0)
+        return -1;
+    CompactNeuralNetwork *net = &fresh;
     
     /* Initialize voltages to reset potential */
     for (size_t i = 0; i < net->total_neurons; i++) {
@@ -230,7 +257,9 @@ int network_init(CompactNeuralNetwork *net,
     net->needs_reset = false;
     net->forward_pass_count = 0;
     net->neuron_activations = 0;
-    
+    network_reset(net);
+    network_free(current);
+    *current = fresh;
     return 0;
 }
 
@@ -250,15 +279,7 @@ void network_free(CompactNeuralNetwork *net)
         net->memory_block = NULL;
     }
     
-    /* Clear all pointers */
-    net->voltages = NULL;
-    net->weights = NULL;
-    net->biases = NULL;
-    net->input_buffer = NULL;
-    net->output_buffer = NULL;
-    
-    net->initialized = false;
-    net->needs_reset = false;
+    memset(net, 0, sizeof *net);
 }
 
 
@@ -275,6 +296,11 @@ void network_reset(CompactNeuralNetwork *net)
     net->forward_pass_count = 0;
     net->neuron_activations = 0;
     net->needs_reset = false;
+    memset(net->input_buffer, 0, net->topology.input_size * sizeof(float));
+    memset(net->output_buffer, 0, net->topology.output_size * sizeof(float));
+    memset(net->voltages, 0, net->topology.input_size * sizeof(float));
+    memset(net->voltages + net->layer_offsets[net->topology.layer_count - 1],
+           0, net->topology.output_size * sizeof(float));
 }
 
 
@@ -297,21 +323,15 @@ void network_forward(CompactNeuralNetwork *net)
         size_t prev_offset = net->layer_offsets[layer - 1];
         size_t curr_offset = net->layer_offsets[layer];
         
-        /* Walk the layer table to find where this layer's weight matrix
-         * starts.  The running sum adds up the sizes of all the weight
-         * matrices that precede layer. */
-        size_t weight_offset = 0;
-        for (int l = 1; l < layer; l++) {
-            weight_offset += (size_t)net->topology.layer_sizes[l] *
-                            (size_t)net->topology.layer_sizes[l - 1];
-        }
+        /* Offsets are generated at initialization and validated on load. */
+        size_t weight_offset = net->weight_offsets[layer - 1];
         
         size_t bias_offset = net->bias_offsets[layer - 1];
         
         /* Process each neuron in current layer */
         for (size_t n = 0; n < curr_size; n++) {
             /* Start with bias */
-            float sum = net->biases[bias_offset + n];
+            double sum = net->biases[bias_offset + n];
             
             /* Dot product of the previous layer's activations (v) with
              * this neuron's row of the weight matrix (w): the heart of
@@ -320,11 +340,15 @@ void network_forward(CompactNeuralNetwork *net)
             float *v = net->voltages + prev_offset;
             
             for (size_t p = 0; p < prev_size; p++) {
-                sum += v[p] * w[p];
+                sum += (double)v[p] * w[p];
             }
             
             /* Apply sigmoid activation */
-            net->voltages[curr_offset + n] = sigmoidf(sum);
+            /* Double accumulation keeps finite float32 products finite.
+             * Stable sigmoid also avoids exponential overflow. */
+            double e = exp(-fabs(sum));
+            net->voltages[curr_offset + n] = (float)(sum >= 0
+                ? 1.0 / (1.0 + e) : e / (1.0 + e));
             net->neuron_activations++;
         }
     }
@@ -350,7 +374,7 @@ int parse_config_string(const char *config_str,
                        uint16_t *layer_sizes,
                        int max_layers)
 {
-    if (!config_str || !layer_sizes || max_layers < 2) {
+    if (!config_str || !layer_sizes || max_layers < 2 || max_layers > MAX_LAYERS) {
         errno = EINVAL;
         return -1;
     }
@@ -359,17 +383,19 @@ int parse_config_string(const char *config_str,
     int count = 0;
     
     /* Parse comma or space separated values */
-    while (*ptr != '\0' && count < max_layers) {
+    while (*ptr != '\0') {
         /* Skip separators */
-        while (*ptr == ' ' || *ptr == '\t' || *ptr == ',') ptr++;
+        while (isspace((unsigned char)*ptr) || *ptr == ',') ptr++;
         if (*ptr == '\0') break;
+        if (count == max_layers) { errno = EINVAL; return -1; }
         
         /* Parse integer */
         errno = 0;
         char *endptr;
         long value = strtol(ptr, &endptr, 10);
         
-        if (ptr == endptr || errno == ERANGE) {
+        if (ptr == endptr || errno == ERANGE ||
+            (*endptr && *endptr != ',' && !isspace((unsigned char)*endptr))) {
             /* No digit found or out of range */
             errno = EINVAL;
             return -1;
@@ -399,38 +425,45 @@ bool parse_input_string(CompactNeuralNetwork *net,
                        const char *input_str)
 {
     if (!net || !net->initialized || !input_str) {
+        errno = EINVAL;
         return false;
     }
     
     const char *ptr = input_str;
     size_t idx = 0;
+    float values[MAX_NEURONS_PER_LAYER];
     
     /* Parse comma or space separated values */
-    while (*ptr != '\0' && idx < net->topology.input_size) {
+    while (*ptr != '\0') {
         /* Skip separators */
-        while (*ptr == ',' || *ptr == ' ' || *ptr == '\t' || *ptr == '\n') ptr++;
+        while (*ptr == ',' || isspace((unsigned char)*ptr)) ptr++;
         if (*ptr == '\0') break;
+        if (idx == net->topology.input_size) { errno = EINVAL; return false; }
         
         /* Parse float */
         errno = 0;
         char *endptr;
         float val = strtof(ptr, &endptr);
         
-        if (ptr == endptr || errno == ERANGE) {
+        if (ptr == endptr || errno == ERANGE || !isfinite(val) ||
+            (*endptr && *endptr != ',' && !isspace((unsigned char)*endptr))) {
             /* Invalid number - fail parsing */
+            errno = EINVAL;
             return false;
         }
         
-        net->input_buffer[idx++] = val;
+        values[idx++] = val;
         ptr = endptr;
     }
     
     /* Only execute forward pass if we got all required inputs */
     if (idx == net->topology.input_size) {
+        memcpy(net->input_buffer, values, idx * sizeof(float));
         network_forward(net);
         return true;
     }
     
+    errno = EINVAL;
     return false;
 }
 
@@ -441,14 +474,15 @@ bool parse_input_string(CompactNeuralNetwork *net,
  *                                                                           *
  *****************************************************************************/
 
-bool network_save(const CompactNeuralNetwork *net, const char *filename)
+static bool network_save_fd(const CompactNeuralNetwork *net, int fd)
 {
-    if (!net || !net->initialized || !filename)
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+        int error = errno;
+        close(fd);
+        errno = error;
         return false;
-
-    FILE *fp = fopen(filename, "wb");
-    if (!fp)
-        return false;
+    }
 
     /* --- File header: magic number and format version --- */
     uint32_t magic   = NET_FILE_MAGIC;
@@ -507,8 +541,43 @@ bool network_save(const CompactNeuralNetwork *net, const char *filename)
         fclose(fp); return false;
     }
     
-    fclose(fp);
-    return true;
+    if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+        int error = errno;
+        fclose(fp);
+        errno = error;
+        return false;
+    }
+    return fclose(fp) == 0;
+}
+
+bool network_save(const CompactNeuralNetwork *net, const char *filename)
+{
+    if (!net || !net->initialized || !filename || !*filename) {
+        errno = EINVAL;
+        return false;
+    }
+    /* Never replace devices, symlinks or other special files. Publish a
+     * complete private model with rename, leaving an old model on failure. */
+    struct stat st;
+    if (lstat(filename, &st) == 0) {
+        if (!S_ISREG(st.st_mode)) { errno = EINVAL; return false; }
+    } else if (errno != ENOENT) {
+        return false;
+    }
+    size_t length = strlen(filename);
+    if (length > SIZE_MAX - 12) { errno = ENAMETOOLONG; return false; }
+    char *temporary = malloc(length + 12);
+    if (!temporary) return false;
+    snprintf(temporary, length + 12, "%s.tmp.XXXXXX", filename);
+    int fd = mkstemp(temporary);
+    if (fd < 0) { free(temporary); return false; }
+    bool ok = network_save_fd(net, fd);
+    if (ok) ok = rename(temporary, filename) == 0;
+    int error = errno;
+    if (!ok) unlink(temporary);
+    free(temporary);
+    errno = error;
+    return ok;
 }
 
 
@@ -519,16 +588,25 @@ bool network_load(CompactNeuralNetwork *net, const char *filename)
         return false;
     }
 
-    FILE *fp = fopen(filename, "rb");
-    if (!fp)
+    int fd = open(filename, O_RDONLY | O_NONBLOCK);
+    if (fd < 0) return false;
+    struct stat file_stat;
+    if (fstat(fd, &file_stat) != 0) {
+        int error = errno;
+        close(fd);
+        errno = error;
         return false;
+    }
+    if (!S_ISREG(file_stat.st_mode)) { close(fd); errno = EINVAL; return false; }
+    FILE *fp = fdopen(fd, "rb");
+    if (!fp) { int error = errno; close(fd); errno = error; return false; }
 
     /* Load as a transaction: read everything into LOCAL variables, validate
      * each field, and only commit the result to *net as the very last step.
      * A half-loaded or inconsistent network must never become visible. */
     uint32_t         magic   = 0;
     uint16_t         version = 0;
-    NetworkTopology  topo;
+    NetworkTopology  topo = {0};
     void            *block   = NULL;
 
     /* ---- 1. File header ---- */
@@ -542,7 +620,8 @@ bool network_load(CompactNeuralNetwork *net, const char *filename)
     if (fread(&topo, sizeof(topo), 1, fp) != 1) goto fail;
 
     /* ---- 2. Validate the topology BEFORE using any of it ---- */
-    if (topo.layer_count < 2 || topo.layer_count > MAX_LAYERS) {
+    if (topo.layer_count < 2 || topo.layer_count > MAX_LAYERS ||
+        !isfinite(topo.reset_potential)) {
         errno = EINVAL;
         goto fail;
     }
@@ -600,9 +679,9 @@ bool network_load(CompactNeuralNetwork *net, const char *filename)
     }
 
     /* ---- 4. Read the offset tables into TEMPORARY arrays ---- */
-    size_t layer_offsets [MAX_LAYERS];
-    size_t weight_offsets[MAX_LAYERS];
-    size_t bias_offsets  [MAX_LAYERS];
+    size_t layer_offsets [MAX_LAYERS] = {0};
+    size_t weight_offsets[MAX_LAYERS - 1] = {0};
+    size_t bias_offsets  [MAX_LAYERS] = {0};
 
     if (fread(layer_offsets, sizeof(size_t),
               topo.layer_count, fp) != topo.layer_count) goto fail;
@@ -616,19 +695,24 @@ bool network_load(CompactNeuralNetwork *net, const char *filename)
     if (fread(bias_offsets, sizeof(size_t),
               topo.layer_count, fp) != topo.layer_count) goto fail;
 
-    /* Defensive check: each layer must start strictly after the previous
-     * one, i.e. the offsets must grow monotonically. */
-    for (uint8_t i = 1; i < topo.layer_count; i++) {
-        if (layer_offsets[i] <= layer_offsets[i - 1] ||
-            bias_offsets[i]  <= bias_offsets[i - 1]) {
+    /* Compare every offset with the canonical layout, including zero
+     * offsets and the final bias sentinel. Monotonicity is insufficient. */
+    size_t expected_layer = 0, expected_bias = 0, expected_weight = 0;
+    for (uint8_t i = 0; i < topo.layer_count; i++) {
+        if (layer_offsets[i] != expected_layer ||
+            bias_offsets[i] != expected_bias) {
             errno = EINVAL;
             goto fail;
         }
-    }
-    if (layer_offsets[topo.layer_count - 1] + topo.layer_sizes[topo.layer_count - 1]
-            != total_neurons) {
-        errno = EINVAL;
-        goto fail;
+        expected_layer += topo.layer_sizes[i];
+        if (i + 1 < topo.layer_count) {
+            if (weight_offsets[i] != expected_weight) {
+                errno = EINVAL;
+                goto fail;
+            }
+            expected_weight += (size_t)topo.layer_sizes[i] * topo.layer_sizes[i + 1];
+            expected_bias += topo.layer_sizes[i + 1];
+        }
     }
 
     /* ---- 5. Compute the arena size, guarding against overflow ---- */
@@ -646,6 +730,16 @@ bool network_load(CompactNeuralNetwork *net, const char *filename)
         total_biases  * elem +
         (size_t)topo.input_size  * elem +
         (size_t)topo.output_size * elem;
+
+    /* Check the payload length before reserving a potentially large arena.
+     * fread checks below still handle files changed after this check. */
+    off_t position = ftello(fp);
+    size_t payload = (total_neurons + total_weights + total_biases) * elem;
+    if (position < 0 || file_stat.st_size < position ||
+        (uintmax_t)(file_stat.st_size - position) != payload) {
+        errno = EINVAL;
+        goto fail;
+    }
 
     block = aligned_malloc(mem_size, SIMD_ALIGNMENT);
     if (!block) {
@@ -666,12 +760,21 @@ bool network_load(CompactNeuralNetwork *net, const char *filename)
     if (fread(volt, elem, total_neurons, fp) != total_neurons) goto fail_block;
     if (fread(wts,  elem, total_weights, fp) != total_weights) goto fail_block;
     if (fread(bs,   elem, total_biases,  fp) != total_biases ) goto fail_block;
+    for (size_t i = 0; i < total_neurons; i++)
+        if (!isfinite(volt[i])) { errno = EINVAL; goto fail_block; }
+    for (size_t i = 0; i < total_weights; i++)
+        if (!isfinite(wts[i])) { errno = EINVAL; goto fail_block; }
+    for (size_t i = 0; i < total_biases; i++)
+        if (!isfinite(bs[i])) { errno = EINVAL; goto fail_block; }
 
     /* ---- 7. Reject trailing garbage after the declared data ---- */
     if (fgetc(fp) != EOF) {
         errno = EINVAL;
         goto fail_block;
     }
+    if (ferror(fp)) { errno = EIO; goto fail_block; }
+    memcpy(inb, volt, topo.input_size * elem);
+    memcpy(outb, volt + layer_offsets[topo.layer_count - 1], topo.output_size * elem);
 
     fclose(fp);
     fp = NULL;
@@ -707,6 +810,10 @@ bool network_load(CompactNeuralNetwork *net, const char *filename)
 fail_block:
     aligned_free(block);
 fail:
-    if (fp) fclose(fp);
+    if (fp) {
+        int error = feof(fp) ? EINVAL : (ferror(fp) ? EIO : errno);
+        fclose(fp);
+        errno = error;
+    }
     return false;
 }

@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # SPDX-FileCopyrightText: 2026 Claire Ivanenka <claire@gnu-ai.org>
 
+if ON_HURD
+translatordir = /hurd
+translator_PROGRAMS = sigmoid-neuron-translator
+else
 bin_PROGRAMS = sigmoid-neuron-translator
+endif
 
 # --- Le cœur de calcul ------------------------------------------------
 # neuron.c est du C23/POSIX pur (réseau sigmoïde feedforward,
@@ -11,6 +16,7 @@ bin_PROGRAMS = sigmoid-neuron-translator
 # les cas ; seule la boucle principale change (voir configure.ac).
 CORE_SOURCES = \
     neuron.c \
+    commands.c \
     trivfs-hooks.c
 
 AM_CPPFLAGS = -I$(top_srcdir)/include

@@ -170,6 +170,7 @@ int main(int argc, char *argv[])
         /* Failed to initialize - this is fatal for a translator */
         fprintf(stderr, "sigmoid-neuron-translator: failed to initialize network: %s\n",
                 strerror(errno));
+        network_free(&global_network);
         return EXIT_FAILURE;
     }
     
@@ -198,6 +199,7 @@ int main(int argc, char *argv[])
                "    4. Use:          cat /llm\n\n" 
                "  For more info: https://github.com/gnu-ai/neuron-translator\n" 
                "================================================================\n");
+        network_free(&global_network);
         return EXIT_FAILURE;
     }
     

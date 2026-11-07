@@ -40,7 +40,7 @@ int main (void)
 {
     /* --- Two fresh networks must be seeded identically -------- */
     uint16_t layers[MAX_LAYERS] = DEFAULT_LAYER_SIZES;
-    CompactNeuralNetwork a, b;
+    CompactNeuralNetwork a = {0}, b = {0};
 
     if (network_init (&a, DEFAULT_LAYER_COUNT, layers) != 0)
         {
@@ -76,7 +76,7 @@ int main (void)
     const char *path = "test-model.nn";
     check ("save v2", network_save (&a, path));
 
-    memset (&b, 0, sizeof (b));
+    network_free (&b);
     check ("load v2", network_load (&b, path));
     check ("same topology after load",
            b.topology.layer_count == a.topology.layer_count
@@ -123,7 +123,7 @@ int main (void)
     fwrite (&forged, sizeof (uint16_t), 1, fp);
     fclose (fp);
 
-    CompactNeuralNetwork c;
+    CompactNeuralNetwork c = {0};
     errno = 0;
     int rejected = !network_load (&c, path) && errno == EINVAL;
     check ("version 1 rejected", rejected);

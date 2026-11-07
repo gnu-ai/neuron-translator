@@ -1,14 +1,26 @@
-<!--
-SPDX-License-Identifier: GPL-3.0-or-later
-Copyright (C) 2026 Claire Ivanenka <claire@gnu-ai.org>
-
-This file is part of the Sigmoid Neuron Translator and is free software:
-you can redistribute it and/or modify it under the terms of the GNU
-General Public License as published by the Free Software Foundation,
-either version 3 of the License, or (at your option) any later version.
--->
 
 # Changes Made to Fix Compilation on GNU/Hurd
+
+## 2026-11: correctness and persistence hardening
+
+- Validate every serialized offset and finite model value, payload size and
+  regular-file type; reject FIFO/device loads without blocking.
+- Make topology replacement transactional and apply the same resource limits
+  as model loading. Initialize buffers, clear reset outputs, restore saved I/O.
+- Accumulate float32 products in double and use a stable sigmoid.
+- Reject extra/malformed inputs and oversized/truncated commands. Add explicit
+  `topology` and `input` verbs while retaining legacy topology-first syntax.
+- Extract portable command/status helpers; render complete large outputs with
+  checked bounds. Hurd readers retain per-open snapshots and checked offsets.
+- Atomically replace saved models with checked flush/close and private temporary
+  files. Restrict Hurd path operations to the server owner/root. Log to stderr
+  instead of predictable shared temporary files.
+- Use the configured version on Hurd, validate/apply --bias, install Hurd
+  translators in /hurd, and include headers/docs in source distributions.
+- Fix the test-model leak and add numerical, malformed-file, parser, large-vector,
+  reset, transactional-load and failed-save regression coverage.
+- Validation scope: Linux build/tests, sanitizers and distribution checks;
+  no QEMU or GNU/Hurd runtime tests in this pass.
 
 ## 2026-10: inference-engine scoping, dead spiking parameters removed
 
